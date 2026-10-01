@@ -1,0 +1,438 @@
+{
+  "name": "ORVIAN · Orçamentos do site",
+  "nodes": [
+    {
+      "id": "83346547-78e5-4499-89cf-42a43e69d29e",
+      "name": "Leia-me",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -120
+      ],
+      "parameters": {
+        "width": 1180,
+        "height": 200,
+        "content": "## ORVIAN · Orçamentos do site\nSite envia o orçamento → nota por regras → IA classifica (quente/morno/frio) → **planilha Leads** + **aviso no Telegram** + **e-mail ao cliente**.\n\nAntes de ativar: 1) crie as 5 credenciais (Header Auth, Gemini, Google Sheets, Telegram, Gmail) · 2) cole o ID da planilha e o seu chat ID · 3) ative o fluxo e copie a *Production URL* do webhook para `QUOTE_WEBHOOK_URL` no `.env` do site. Passo a passo em `n8n/README.md`."
+      }
+    },
+    {
+      "id": "2ac52bfd-2e9f-4f3f-8e3f-a05ef28158f4",
+      "name": "Orçamento do site",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "eef529e1-961b-4cde-8ade-420b2dfbf4a9",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "orvian-orcamento",
+        "authentication": "headerAuth",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "name": "ORVIAN · chave do site"
+        }
+      },
+      "notes": "Recebe cada orçamento enviado pelo site (server.ts → /api/quote). Protegido pelo cabeçalho X-Orvian-Secret."
+    },
+    {
+      "id": "bee4d273-fc95-4cd9-aac7-907bdd80cce6",
+      "name": "Pontuar lead",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ],
+      "parameters": {
+        "jsCode": "/**\n * n8n · nó \"Pontuar lead\" (Code, executa uma vez para todos os itens)\n *\n * Recebe o orçamento enviado pelo site (corpo do Webhook) e:\n *  1. calcula uma nota de 1 a 10 por regras simples — serve de referência\n *     para a IA e de reserva caso a IA esteja indisponível;\n *  2. monta o pedido para o Gemini classificar o lead.\n */\nconst lead = $input.first().json.body ?? {};\nconst valores = lead.estimativaNum ?? {};\nconst itens = Array.isArray(lead.itens) ? lead.itens : [];\nconst cliente = lead.cliente ?? {};\n\n// ── Nota por regras ──────────────────────────────────────────────\nlet nota = 1;\nconst motivos = [];\n\nconst ticket = (valores.projetosMax ?? 0) + (valores.mensalMax ?? 0) * 6; // mensal ≈ 6 meses\nif (ticket >= 8000) { nota += 4; motivos.push('ticket alto'); }\nelse if (ticket >= 3000) { nota += 3; motivos.push('ticket médio'); }\nelse if (ticket >= 1000) { nota += 2; motivos.push('ticket de entrada'); }\n\nif ((valores.mensalMax ?? 0) > 0) { nota += 1; motivos.push('recorrência mensal'); }\nif (itens.length >= 2) { nota += 1; motivos.push(`${itens.length} serviços`); }\nif (lead.prazo === 'expresso') { nota += 1; motivos.push('urgência (expresso)'); }\nif ((lead.observacoes ?? '').trim().length > 40) { nota += 1; motivos.push('briefing detalhado'); }\nif (cliente.empresa) { nota += 1; motivos.push('informou a empresa'); }\n\nnota = Math.max(1, Math.min(10, nota));\nconst prioridade = nota >= 7 ? 'quente' : nota >= 4 ? 'morno' : 'frio';\n\n// ── Pedido para a IA ─────────────────────────────────────────────\nconst servicos = itens.map((i) => `${i.servico} — ${i.pacote} (${i.cobranca}, R$ ${i.valorMin}–${i.valorMax})`).join('; ');\nconst prompt = `Você qualifica leads da ORVIAN, agência digital premium (marca, Instagram, sites e automação com IA).\nAnalise o pedido de orçamento abaixo e responda SOMENTE com JSON no formato:\n{\"nota\": número de 1 a 10, \"prioridade\": \"quente\" | \"morno\" | \"frio\", \"resumo\": \"1 frase sobre o cliente e a necessidade\", \"proximoPasso\": \"ação recomendada para o primeiro contato\"}\n\nPedido:\n- Empresa: ${cliente.empresa || 'não informada'} · Segmento: ${cliente.segmento || 'não informado'}\n- Serviços: ${servicos || 'nenhum'}\n- Estimativa: projetos ${lead.estimativa?.projetos ?? '-'} · mensal ${lead.estimativa?.mensal ?? '-'}\n- Prazo: ${lead.prazo === 'expresso' ? 'expresso (urgente)' : 'padrão'}\n- Observações do cliente: ${lead.observacoes || 'nenhuma'}\n\nReferência por regras: nota ${nota} (${motivos.join(', ') || 'poucos sinais'}). Ajuste se o contexto justificar.`;\n\nreturn [\n  {\n    json: {\n      ...lead,\n      regra: { nota, prioridade, motivos },\n      geminiBody: {\n        contents: [{ role: 'user', parts: [{ text: prompt }] }],\n        generationConfig: { temperature: 0.2, responseMimeType: 'application/json' },\n      },\n    },\n  },\n];\n"
+      },
+      "notes": "Nota por regras (reserva) + pedido para a IA."
+    },
+    {
+      "id": "ea042730-4657-4a6e-9d1c-cd9444482e72",
+      "name": "Classificar com IA (Gemini)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        480,
+        300
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpQueryAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.geminiBody) }}",
+        "options": {
+          "timeout": 20000
+        }
+      },
+      "credentials": {
+        "httpQueryAuth": {
+          "name": "Gemini API key"
+        }
+      },
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 2,
+      "notes": "Se a IA falhar, o fluxo continua e a nota por regras é usada."
+    },
+    {
+      "id": "93a0349d-b1c7-4577-ab34-3fd0d6b40660",
+      "name": "Montar lead",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        300
+      ],
+      "parameters": {
+        "jsCode": "/**\n * n8n · nó \"Montar lead\" (Code, executa uma vez para todos os itens)\n *\n * Junta o orçamento com a resposta da IA e prepara as três saídas:\n *  - a linha da planilha \"Leads\";\n *  - a mensagem do Telegram para a ORVIAN;\n *  - o e-mail de confirmação para o cliente.\n * Se a IA falhar (sem chave, fora do ar), usa a nota calculada por regras.\n */\nconst lead = $('Pontuar lead').first().json;\nconst resposta = $input.first().json;\nconst cliente = lead.cliente ?? {};\nconst itens = Array.isArray(lead.itens) ? lead.itens : [];\n\n// ── Resposta da IA (com reserva) ─────────────────────────────────\nlet ia = null;\ntry {\n  const texto = resposta.candidates[0].content.parts[0].text;\n  ia = JSON.parse(texto.replace(/```json|```/g, '').trim());\n} catch (erro) {\n  ia = null; // segue com a nota por regras\n}\n\nconst nota = Math.max(1, Math.min(10, Math.round(Number(ia?.nota)) || lead.regra.nota));\nconst prioridade = ['quente', 'morno', 'frio'].includes(ia?.prioridade) ? ia.prioridade : lead.regra.prioridade;\nconst resumo = ia?.resumo || `Interesse em ${itens.map((i) => i.servico).join(', ') || 'serviços da ORVIAN'}.`;\nconst proximoPasso = ia?.proximoPasso || 'Retornar pelo WhatsApp e agendar um briefing rápido.';\nconst classificadoPor = ia ? 'IA' : 'regras';\n\n// ── Utilidades ───────────────────────────────────────────────────\n/** Escapa texto do cliente antes de colocar em HTML (Telegram e e-mail). */\nconst esc = (t) => String(t ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst primeiroNome = String(cliente.nome ?? '').trim().split(' ')[0] || 'olá';\nconst dataBR = new Date(lead.createdAt ?? Date.now()).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });\nconst whatsapp = String(cliente.whatsapp ?? '').replace(/\\D/g, '');\nconst icone = { quente: '🔥', morno: '🌤️', frio: '❄️' }[prioridade];\nconst listaServicos = itens.map((i) => `${i.servico} — ${i.pacote}`).join(' · ');\n\n// ── Telegram (HTML) ──────────────────────────────────────────────\nconst telegram = [\n  `${icone} <b>Novo orçamento ${esc(lead.protocol)}</b> — lead ${prioridade} (${nota}/10)`,\n  '',\n  `<b>${esc(cliente.nome)}</b>${cliente.empresa ? ` · ${esc(cliente.empresa)}` : ''}${cliente.segmento ? ` · ${esc(cliente.segmento)}` : ''}`,\n  `📱 <a href=\"https://wa.me/55${whatsapp.replace(/^55/, '')}\">${esc(cliente.whatsapp)}</a> · ✉️ ${esc(cliente.email)}`,\n  '',\n  ...itens.map((i) => `• ${esc(i.servico)} — ${esc(i.pacote)}`),\n  '',\n  `💰 Projetos: ${esc(lead.estimativa?.projetos)} · Mensal: ${esc(lead.estimativa?.mensal)}`,\n  `⏱️ Prazo: ${lead.prazo === 'expresso' ? 'Expresso' : 'Padrão'}`,\n  lead.observacoes ? `📝 ${esc(lead.observacoes)}` : null,\n  '',\n  `🤖 <i>${esc(resumo)}</i>`,\n  `➡️ ${esc(proximoPasso)}`,\n]\n  .filter((l) => l !== null)\n  .join('\\n');\n\n// ── E-mail para o cliente ────────────────────────────────────────\nconst linhasItens = itens\n  .map(\n    (i) => `<tr><td style=\"padding:10px 0;border-bottom:1px solid #22252d;color:#efede6\">${esc(i.servico)}<br><span style=\"color:#8b8f98;font-size:13px\">${esc(i.pacote)} · ${esc(i.prazo)}</span></td></tr>`,\n  )\n  .join('');\n\nconst emailHtml = `<!doctype html><html><body style=\"margin:0;background:#07080b;font-family:Arial,Helvetica,sans-serif\">\n<table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"background:#07080b;padding:32px 16px\"><tr><td align=\"center\">\n<table width=\"560\" cellpadding=\"0\" cellspacing=\"0\" style=\"max-width:560px;background:#0e1015;border:1px solid #22252d;border-radius:20px;padding:36px\">\n<tr><td style=\"color:#8b8f98;font-size:11px;letter-spacing:3px;text-transform:uppercase\">ORVIAN · Serviços Digitais</td></tr>\n<tr><td style=\"padding-top:18px;color:#efede6;font-size:24px;line-height:1.3\">Recebemos seu pedido, ${esc(primeiroNome)}.</td></tr>\n<tr><td style=\"padding-top:12px;color:#a3a6ad;font-size:15px;line-height:1.6\">Nossa equipe está analisando o seu projeto e retorna pelo WhatsApp em até 2 horas úteis com a proposta personalizada.</td></tr>\n<tr><td style=\"padding-top:22px\"><span style=\"display:inline-block;border:1px solid #33363f;border-radius:999px;padding:8px 16px;color:#efede6;font-family:monospace;font-size:14px\">Protocolo ${esc(lead.protocol)}</span></td></tr>\n<tr><td style=\"padding-top:24px\"><table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\">${linhasItens}</table></td></tr>\n<tr><td style=\"padding-top:16px;color:#a3a6ad;font-size:14px\">Estimativa: <b style=\"color:#efede6\">${esc(lead.estimativa?.projetos)}</b>${(lead.estimativaNum?.mensalMax ?? 0) > 0 ? ` + <b style=\"color:#efede6\">${esc(lead.estimativa?.mensal)}</b>` : ''}<br><span style=\"font-size:12px;color:#6b6f78\">Valores de referência — o final é confirmado após o briefing.</span></td></tr>\n<tr><td style=\"padding-top:28px;color:#a3a6ad;font-size:14px;line-height:1.6\">Enquanto isso, acompanhe bastidores e cases no Instagram: <a href=\"https://www.instagram.com/byorvian/\" style=\"color:#efede6\">@byorvian</a></td></tr>\n</table></td></tr></table></body></html>`;\n\nreturn [\n  {\n    json: {\n      // Colunas da aba \"Leads\" (os nomes batem com o cabeçalho da planilha)\n      data: dataBR,\n      protocolo: lead.protocol,\n      nome: cliente.nome,\n      email: cliente.email,\n      whatsapp: cliente.whatsapp,\n      empresa: cliente.empresa || '',\n      segmento: cliente.segmento || '',\n      servicos: listaServicos,\n      projetos: lead.estimativa?.projetos ?? '',\n      mensal: lead.estimativa?.mensal ?? '',\n      prazo: lead.prazo === 'expresso' ? 'Expresso' : 'Padrão',\n      observacoes: lead.observacoes || '',\n      nota,\n      prioridade,\n      resumo,\n      proximoPasso,\n      classificadoPor,\n      status: 'Novo',\n      // Mensagens\n      telegram,\n      emailAssunto: `ORVIAN · Recebemos seu pedido (${lead.protocol})`,\n      emailHtml,\n    },\n  },\n];\n"
+      },
+      "notes": "Prepara a linha da planilha, a mensagem do Telegram e o e-mail do cliente."
+    },
+    {
+      "id": "610cfd02-834f-4f12-9fb8-9567327ef008",
+      "name": "Salvar na planilha",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        980,
+        120
+      ],
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "COLE_AQUI_O_ID_DA_PLANILHA"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "name",
+          "value": "Leads"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Data": "={{ $json.data }}",
+            "Protocolo": "={{ $json.protocolo }}",
+            "Nome": "={{ $json.nome }}",
+            "E-mail": "={{ $json.email }}",
+            "WhatsApp": "={{ $json.whatsapp }}",
+            "Empresa": "={{ $json.empresa }}",
+            "Segmento": "={{ $json.segmento }}",
+            "Serviços": "={{ $json.servicos }}",
+            "Projetos": "={{ $json.projetos }}",
+            "Mensal": "={{ $json.mensal }}",
+            "Prazo": "={{ $json.prazo }}",
+            "Observações": "={{ $json.observacoes }}",
+            "Nota": "={{ $json.nota }}",
+            "Prioridade": "={{ $json.prioridade }}",
+            "Resumo IA": "={{ $json.resumo }}",
+            "Próximo passo": "={{ $json.proximoPasso }}",
+            "Classificado por": "={{ $json.classificadoPor }}",
+            "Status": "={{ $json.status }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Data",
+              "displayName": "Data",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Protocolo",
+              "displayName": "Protocolo",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Nome",
+              "displayName": "Nome",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "E-mail",
+              "displayName": "E-mail",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "WhatsApp",
+              "displayName": "WhatsApp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Empresa",
+              "displayName": "Empresa",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Segmento",
+              "displayName": "Segmento",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Serviços",
+              "displayName": "Serviços",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Projetos",
+              "displayName": "Projetos",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Mensal",
+              "displayName": "Mensal",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Prazo",
+              "displayName": "Prazo",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Observações",
+              "displayName": "Observações",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Nota",
+              "displayName": "Nota",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Prioridade",
+              "displayName": "Prioridade",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Resumo IA",
+              "displayName": "Resumo IA",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Próximo passo",
+              "displayName": "Próximo passo",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Classificado por",
+              "displayName": "Classificado por",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Status",
+              "displayName": "Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "name": "Google Sheets"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "a8c6f78b-b50f-49fb-821d-757261467190",
+      "name": "Avisar no Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        980,
+        300
+      ],
+      "parameters": {
+        "chatId": "COLE_AQUI_SEU_CHAT_ID",
+        "text": "={{ $json.telegram }}",
+        "additionalFields": {
+          "parse_mode": "HTML",
+          "disable_web_page_preview": true,
+          "appendAttribution": false
+        }
+      },
+      "credentials": {
+        "telegramApi": {
+          "name": "Telegram · bot ORVIAN"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "2928abc0-831a-47ca-8d2e-2d11839baa0c",
+      "name": "E-mail para o cliente",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        980,
+        480
+      ],
+      "parameters": {
+        "sendTo": "={{ $json.email }}",
+        "subject": "={{ $json.emailAssunto }}",
+        "emailType": "html",
+        "message": "={{ $json.emailHtml }}",
+        "options": {
+          "appendAttribution": false,
+          "senderName": "ORVIAN"
+        }
+      },
+      "credentials": {
+        "gmailOAuth2": {
+          "name": "Gmail ORVIAN"
+        }
+      },
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "Orçamento do site": {
+      "main": [
+        [
+          {
+            "node": "Pontuar lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pontuar lead": {
+      "main": [
+        [
+          {
+            "node": "Classificar com IA (Gemini)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classificar com IA (Gemini)": {
+      "main": [
+        [
+          {
+            "node": "Montar lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Montar lead": {
+      "main": [
+        [
+          {
+            "node": "Salvar na planilha",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Avisar no Telegram",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "E-mail para o cliente",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/Sao_Paulo"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}

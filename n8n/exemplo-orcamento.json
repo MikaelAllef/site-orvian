@@ -1,0 +1,44 @@
+{
+  "protocol": "ORV-TESTE1",
+  "createdAt": "2026-10-01T18:56:53.697Z",
+  "cliente": {
+    "nome": "Ana Souza",
+    "email": "ana@clinicabella.com.br",
+    "whatsapp": "(11) 98765-4321",
+    "empresa": "Clínica Bella",
+    "segmento": "Saúde & estética"
+  },
+  "prazo": "expresso",
+  "observacoes": "Quero renovar o site da clínica e começar a postar 3x por semana, temos 2 unidades em SP.",
+  "itens": [
+    {
+      "servico": "Sites & Landing Pages",
+      "pacote": "Site Institucional",
+      "idPlanilha": 6,
+      "cobranca": "Projeto",
+      "valorMin": 2400,
+      "valorMax": 5000,
+      "prazo": "5 a 10 dias úteis"
+    },
+    {
+      "servico": "Instagram Profissional",
+      "pacote": "Gestão de Instagram",
+      "idPlanilha": 5,
+      "cobranca": "Mensal",
+      "valorMin": 300,
+      "valorMax": 1500,
+      "prazo": "Recorrente"
+    }
+  ],
+  "estimativa": {
+    "projetos": "R$ 3.000 – R$ 6.250",
+    "mensal": "R$ 300 – R$ 1.500/mês"
+  },
+  "estimativaNum": {
+    "projetosMin": 3000,
+    "projetosMax": 6250,
+    "mensalMin": 300,
+    "mensalMax": 1500
+  },
+  "origem": "site"
+}
